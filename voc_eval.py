@@ -14,54 +14,39 @@
 # ==============================================================================
 
 """Evaluation for VOC 2007.
-
-Accuracy:
-cifar10_train.py achieves 83.0% accuracy after 100K steps (256 epochs
-of data) as judged by cifar10_eval.py.
-
-Speed:
-On a single Tesla K40, cifar10_train.py processes a single batch of 128 images
-in 0.25-0.35 sec (i.e. 350 - 600 images /sec). The model reaches ~86%
-accuracy after 100K steps in 8 hours of training time.
-
-Usage:
-Please see the tutorial and website for how to download the CIFAR-10
-data set, compile the program and train the model.
-
-http://tensorflow.org/tutorials/deep_cnn/
 """
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from datetime import datetime
 import math
 import time
-
 import numpy as np
 import tensorflow as tf
-
 import voc
+import json
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('eval_dir', 'data/eval',
+tf.app.flags.DEFINE_string('eval_dir', 'ADEF/eval',
                            """Directory where to write event logs.""")
-tf.app.flags.DEFINE_string('eval_data', 'test',
-                           """Either 'test' or 'train_eval'.""")
-tf.app.flags.DEFINE_string('checkpoint_dir', 'data/train/model.ckpt-99999',
+tf.app.flags.DEFINE_string('checkpoint_dir', 'ADEF/train/vgg16-model.ckpt-50w',
                            """Directory where to read model checkpoints.""")
-tf.app.flags.DEFINE_integer('num_class', 20,
+tf.app.flags.DEFINE_integer('num_class', 95,
                             """The number of classes in dataset""")
 tf.app.flags.DEFINE_integer('eval_interval_secs', 60 * 5,
                             """How often to run the eval.""")
-tf.app.flags.DEFINE_integer('num_examples', 4952,
+tf.app.flags.DEFINE_integer('num_examples', 2835,
                             """Number of examples to run.""")
 tf.app.flags.DEFINE_boolean('run_once', True,
-                         """Whether to run eval only once.""")
+                            """Whether to run eval only once.""")
+tf.flags.DEFINE_string("class_list", 'ADEF/class_list.txt',
+                       "Txt file contain class names")
+tf.app.flags.DEFINE_string('test_pattern', 'ADEF/TFR/test-?????-of-00002',
+                           """The TF record file pattern for test set""")
 
 
-def get_mAP(logits, labels, sess, num_class, thresh=0.5):
+def get_metrics(logits, labels, sess, num_class, thresh=0.5):
   true_condiction = num_class*[0]
   pred_condiction = num_class*[0]
   true_positive = num_class*[0]
@@ -82,6 +67,46 @@ def get_mAP(logits, labels, sess, num_class, thresh=0.5):
   return true_condiction, pred_condiction, true_positive
 
 
+def get_logit_label(logits, labels, sess):
+  [logits_batch, labels_batch] = sess.run([logits, labels])
+  return logits_batch, labels_batch
+
+
+def get_bool_result(logits, labels, sess, num_class, thresh=0.5):
+  logits_bool = num_class * [False]
+  labels_bool = num_class * [False]
+
+  assert logits.get_shape() == labels.get_shape(),\
+    'Logits and labels length unequal!'
+
+  [logits_, labels_] = sess.run([logits, labels])
+  for i in xrange(0, len(logits_)):
+    for j in xrange(0, num_class):
+      if labels_[i][j] != 0:
+        labels_bool[j] = True
+      if logits_[i][j] >= thresh:
+        logits_bool[j] += 1
+
+  return logits_bool, labels_bool
+
+
+def get_average_precision(logit, label):
+  index = np.argsort(logit)[::-1]
+  total_obj = sum(label)
+  hit= 0.
+  average_precision = 0.
+  # print('Total objects: %d' % total_obj)
+  for i in xrange(len(logit)):
+    if label[index[i]] != 0:
+      hit += 1
+      average_precision += hit/(i+1)
+      if hit == total_obj:
+        # print('threshold: %.3f, number %d' % (logit[index[i]], i))
+        break
+
+  return average_precision/total_obj
+
+
 def eval_once(saver, summary_writer, logits, labels, summary_op):
   """Run Eval once.
 
@@ -92,19 +117,9 @@ def eval_once(saver, summary_writer, logits, labels, summary_op):
     summary_op: Summary op.
   """
   with tf.Session() as sess:
-    # ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
-    # if ckpt and ckpt.model_checkpoint_path:
-    #   # Restores from checkpoint
-    #   saver.restore(sess, ckpt.model_checkpoint_path)
-    #   # Assuming model_checkpoint_path looks something like:
-    #   #   /my-favorite-path/cifar10_train/model.ckpt-0,
-    #   # extract global_step from it.
-    #   global_step = ckpt.model_checkpoint_path.split('/')[-1].split('-')[-1]
-    # else:
-    #   print('No checkpoint file found')
-    #   return
-    global_step = 10000
+
     saver.restore(sess, FLAGS.checkpoint_dir)
+    num_class = FLAGS.num_class
 
     # Start the queue runners.
     coord = tf.train.Coordinator()
@@ -115,27 +130,76 @@ def eval_once(saver, summary_writer, logits, labels, summary_op):
                                          start=True))
 
       num_iter = int(math.ceil(FLAGS.num_examples / FLAGS.batch_size))
+      pre = []
+      gt = []
 
-      mAP = []
-      update = []
-      for i in xrange(0, FLAGS.num_class):
-       mAP_pc, update_pc = tf.contrib.metrics.streaming_sparse_average_precision_at_k(
-         logits[:, i], labels[:, i], 10)
-       mAP.append(mAP_pc)
-       update.append(update_pc)
-      sess.run(tf.initialize_local_variables())
       step = 0
       while step < num_iter and not coord.should_stop():
         step += 1
-        sess.run(update)
+        pre_batch, gt_batch = get_logit_label(logits, labels, sess)
+        pre.extend(pre_batch.tolist())
+        gt.extend(gt_batch.tolist())
         if not step % 20:
-         print('Mean average precision after batch %d' % step)
+          print('Collecting logits and labels for batch %d' % step)
 
-       #print('Final Mean average precision: %f' % mAP.eval())
-      result = sess.run(mAP)
-      print ('---------------------------------------------')
-      for e in xrange(0, len(result)):
-       print ('Mean average precision: %.3f' % result[e])
+      print ('---Collect all predicted labels and ground true labels--------')
+      result = {'ground_true': gt, 'predicted': pre}
+      pre = np.array(pre)
+      gt = np.array(gt)
+      average_precisions = []
+      class_list = [l.rstrip('\n') for l in open(FLAGS.class_list, 'r')]
+      for i in xrange(num_class):
+        ap_per = get_average_precision(pre[:, i], gt[:, i])
+        print('Class name: p=%.3f' % (ap_per))
+        average_precisions.append(ap_per)
+
+      result['mAP'] = average_precisions
+      with open('result.json', 'w') as json_file:
+        json.dump(result, json_file)
+
+      # tp = num_class * [0]
+      # tc = num_class * [0]
+      # pc = num_class * [0]
+      #
+      # step = 0
+      # while step < num_iter and not coord.should_stop():
+      #   tc_batch, pc_batch, tp_batch = get_metrics(logits, labels, sess, 20)
+      #   tc = np.sum([tc, tc_batch], axis=0)
+      #   pc = np.sum([pc, pc_batch], axis=0)
+      #   tp = np.sum([tp, tp_batch], axis=0)
+      #   if not step % 20:
+      #     print('Mean average precision after batch %d' % step)
+      #   step += 1
+      #
+      # print ('-------------------------------------------------------')
+      # recall = np.divide(tp, tc, dtype=float)
+      # precision = np.divide(tp, pc, dtype=float)
+      # for i in xrange(20):
+      #  print ('Recall @0.5: %.3f , Precision @0.5: %.3f' % (recall[i], precision[i]))
+
+
+
+      # mAP = []
+      # update = []
+      # for i in xrange(0, FLAGS.num_class):
+      #  mAP_pc, update_pc = tf.contrib.metrics.streaming_sparse_average_precision_at_k(
+      #    logits[:, i], labels[:, i], 10)
+      #  mAP.append(mAP_pc)
+      #  update.append(update_pc)
+      # sess.run(tf.initialize_local_variables())
+      # step = 0
+      # while step < num_iter and not coord.should_stop():
+      #   step += 1
+      #   sess.run(update)
+      #   if not step % 20:
+      #    print('Mean average precision after batch %d' % step)
+      #
+      #  #print('Final Mean average precision: %f' % mAP.eval())
+      # result = sess.run(mAP)
+      # print ('---------------------------------------------')
+
+      # for e in xrange(0, len(result)):
+      #  print ('Mean average precision: %.3f' % result[e])
 
     except Exception as e:  # pylint: disable=broad-except
       coord.request_stop(e)
@@ -145,18 +209,15 @@ def eval_once(saver, summary_writer, logits, labels, summary_op):
 
 
 def evaluate():
-  """Eval CIFAR-10 for a number of steps."""
+  """Eval VOC 07 for a number of steps."""
   with tf.Graph().as_default() as g:
-    # Get images and labels for CIFAR-10.
-    eval_data = FLAGS.eval_data == 'test'
-    images, labels = voc.inputs(eval_data=eval_data)
+    # Get images and labels from ADEF dataset for testing.
+    images, labels = voc.inputs(is_training=False)
 
     # Build a Graph that computes the logits predictions from the
     # inference model.
-    logits = voc.inference(images)
+    logits = voc.vgg_inference(images, is_training=False)
     labels = tf.cast(labels, dtype=tf.int64)
-    # Calculate predictions.
-    # top_k_op = tf.nn.in_top_k(logits, labels, 1)
 
     # Restore the moving average version of the learned variables for eval.
     variable_averages = tf.train.ExponentialMovingAverage(

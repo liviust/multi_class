@@ -35,35 +35,22 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import gzip
-import os
 import re
-import sys
-import tarfile
-
-from six.moves import urllib
 import tensorflow as tf
-
 import voc_input
 import nets.inception_v3 as inception
-from nets import vgg
+# from nets import vgg
+from nets import my_vgg
 FLAGS = tf.app.flags.FLAGS
 
 # Basic model parameters.
-tf.app.flags.DEFINE_integer('batch_size', 32,
+tf.app.flags.DEFINE_integer('batch_size', 2,
                             """Number of images to process in a batch.""")
-tf.app.flags.DEFINE_string('data_dir', 'data/tf',
-                           """Path to the training TFR data directory.""")
-tf.app.flags.DEFINE_string('train_pattern', 'train-%.5d-of-00002',
-                           """The TF record file pattern for train set""")
-tf.app.flags.DEFINE_string('test_pattern', 'test-%.5d-of-00002',
-                           """The TF record file pattern for test set""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16.""")
 
 # Global constants describing the VOC 2007 data set.
 IMAGE_SIZE = voc_input.IMAGE_SIZE
-NUM_CLASSES = voc_input.NUM_CLASSES
 NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = voc_input.NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN
 NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = voc_input.NUM_EXAMPLES_PER_EPOCH_FOR_EVAL
 
@@ -144,136 +131,32 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
   return var
 
 
-def distorted_inputs():
-  """Construct distorted input for CIFAR training using the Reader ops.
+def inputs(is_training=True):
+  """Construct input for ADEF train/test dataset using the Reader ops.
+
+  Args:
+    is_training: training phase or not. During training, the image would be distorted
 
   Returns:
     images: Images. 4D tensor of [batch_size, IMAGE_SIZE, IMAGE_SIZE, 3] size.
     labels: Labels. 2D tensor of [batch_size, NUM_CLASS] size.
-
-  Raises:
-    ValueError: If no data_dir
   """
-  if not FLAGS.data_dir:
-    raise ValueError('Please supply a data_dir')
-  data_dir = FLAGS.data_dir
-  images, labels = voc_input.distorted_inputs(data_dir=data_dir,
-                                              batch_size=FLAGS.batch_size,
-                                              pattern=FLAGS.train_pattern,
-                                              num_class=NUM_CLASSES)
+  if is_training:
+    # Read images and labels for train data
+    images, labels = voc_input.distorted_inputs(batch_size=FLAGS.batch_size,
+                                                pattern=FLAGS.train_pattern,
+                                                num_class=FLAGS.num_class,
+                                                is_training=True)
+  else:
+    # Read images and labels for test data
+    images, labels = voc_input.distorted_inputs(batch_size=FLAGS.batch_size,
+                                                pattern=FLAGS.test_pattern,
+                                                num_class=FLAGS.num_class,
+                                                is_training=False)
   if FLAGS.use_fp16:
     images = tf.cast(images, tf.float16)
     labels = tf.cast(labels, tf.float16)
   return images, labels
-
-
-def inputs(eval_data):
-  """Construct input for CIFAR evaluation using the Reader ops.
-
-  Args:
-    eval_data: bool, indicating if one should use the train or eval data set.
-
-  Returns:
-    images: Images. 4D tensor of [batch_size, IMAGE_SIZE, IMAGE_SIZE, 3] size.
-    labels: Labels. 2D tensor of [batch_size, num_class] size.
-
-  Raises:
-    ValueError: If no data_dir
-  """
-  if not FLAGS.data_dir:
-    raise ValueError('Please supply a data_dir')
-  data_dir = FLAGS.data_dir
-  images, labels = voc_input.eval_inputs(data_dir=data_dir,
-                                         batch_size=FLAGS.batch_size,
-                                         pattern=FLAGS.test_pattern,
-                                         num_class=NUM_CLASSES)
-  if FLAGS.use_fp16:
-    images = tf.cast(images, tf.float16)
-    labels = tf.cast(labels, tf.float16)
-  return images, labels
-
-
-def inference(images):
-  """Build the CIFAR-10 model.
-
-  Args:
-    images: Images returned from distorted_inputs() or inputs().
-
-  Returns:
-    Logits.
-  """
-  # We instantiate all variables using tf.get_variable() instead of
-  # tf.Variable() in order to share variables across multiple GPU training runs.
-  # If we only ran this model on a single GPU, we could simplify this function
-  # by replacing all instances of tf.get_variable() with tf.Variable().
-  #
-  # conv1
-  with tf.variable_scope('conv1') as scope:
-    kernel = _variable_with_weight_decay('weights',
-                                         shape=[5, 5, 3, 64],
-                                         stddev=5e-2,
-                                         wd=0.0)
-    conv = tf.nn.conv2d(images, kernel, [1, 1, 1, 1], padding='SAME')
-    biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.0))
-    bias = tf.nn.bias_add(conv, biases)
-    conv1 = tf.nn.relu(bias, name=scope.name)
-    _activation_summary(conv1)
-
-  # pool1
-  pool1 = tf.nn.max_pool(conv1, ksize=[1, 3, 3, 1], strides=[1, 2, 2, 1],
-                         padding='SAME', name='pool1')
-  # norm1
-  norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-                    name='norm1')
-
-  # conv2
-  with tf.variable_scope('conv2') as scope:
-    kernel = _variable_with_weight_decay('weights',
-                                         shape=[5, 5, 64, 64],
-                                         stddev=5e-2,
-                                         wd=0.0)
-    conv = tf.nn.conv2d(norm1, kernel, [1, 1, 1, 1], padding='SAME')
-    biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
-    bias = tf.nn.bias_add(conv, biases)
-    conv2 = tf.nn.relu(bias, name=scope.name)
-    _activation_summary(conv2)
-
-  # norm2
-  norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
-                    name='norm2')
-  # pool2
-  pool2 = tf.nn.max_pool(norm2, ksize=[1, 3, 3, 1],
-                         strides=[1, 2, 2, 1], padding='SAME', name='pool2')
-
-  # local3
-  with tf.variable_scope('local3') as scope:
-    # Move everything into depth so we can perform a single matrix multiply.
-    reshape = tf.reshape(pool2, [FLAGS.batch_size, -1])
-    dim = reshape.get_shape()[1].value
-    weights = _variable_with_weight_decay('weights', shape=[dim, 384],
-                                          stddev=0.04, wd=0.004)
-    biases = _variable_on_cpu('biases', [384], tf.constant_initializer(0.1))
-    local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
-    _activation_summary(local3)
-
-  # local4
-  with tf.variable_scope('local4') as scope:
-    weights = _variable_with_weight_decay('weights', shape=[384, 192],
-                                          stddev=0.04, wd=0.004)
-    biases = _variable_on_cpu('biases', [192], tf.constant_initializer(0.1))
-    local4 = tf.nn.relu(tf.matmul(local3, weights) + biases, name=scope.name)
-    _activation_summary(local4)
-
-  # softmax, i.e. softmax(WX + b)
-  with tf.variable_scope('softmax_linear') as scope:
-    weights = _variable_with_weight_decay('weights', [192, NUM_CLASSES],
-                                          stddev=1/192.0, wd=0.0)
-    biases = _variable_on_cpu('biases', [NUM_CLASSES],
-                              tf.constant_initializer(0.0))
-    softmax_linear = tf.add(tf.matmul(local4, weights), biases, name=scope.name)
-    _activation_summary(softmax_linear)
-
-  return softmax_linear
 
 
 def loss(logits, labels):
@@ -305,7 +188,7 @@ def loss(logits, labels):
 # -------------------Julius------------------------------------------------------------------
 # Use pre-trained inception_v3 to fine-tune multi-label classification
 def inception_v3_inference(images):
-    logits, _ = inception.inception_v3(images, num_classes=NUM_CLASSES)
+    logits, _ = inception.inception_v3(images, num_classes=FLAGS.num_class)
     return logits
 
 
@@ -320,9 +203,9 @@ def inception_loss(logits, labels):
 
 # ---------------------Julius----------------------------------------------------------------
 # Use pre-trained VGG-16 to fine-tune multi-label classification
-def vgg_inference(images):
-    logits, _ = vgg.vgg_16(images, num_classes=NUM_CLASSES, spatial_squeeze=False)
-    return tf.reshape(logits, [FLAGS.batch_size, NUM_CLASSES])
+def vgg_inference(images, is_training=True):
+    logits, _ = my_vgg.vgg_16(images, num_classes=FLAGS.num_class, is_training=is_training, spatial_squeeze=False)
+    return tf.reshape(logits, [-1, FLAGS.num_class])
 
 
 def vgg_loss(logits, labels):
@@ -331,6 +214,34 @@ def vgg_loss(logits, labels):
     cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
     tf.add_to_collection('losses', cross_entropy_mean)
     return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+
+def vgg_predict(images):
+    logit, _ = my_vgg.vgg_16(images, num_classes=FLAGS.num_class, is_training=False, spatial_squeeze=False)
+    # logit_sigmoid = tf.sigmoid(logit)
+    return tf.reshape(logit, [FLAGS.num_class])
+# -------------------------------------------------------------------------------------------
+
+
+# ---------------------Julius----------------------------------------------------------------
+# Use pre-trained VGG-16 to fine-tune multi-label classification
+def vgg_fc_inference(images, is_training=True):
+    logits, _ = my_vgg.vgg_fc_16(images, num_classes=FLAGS.num_class, is_training=is_training)
+    return tf.reshape(logits, [-1, FLAGS.num_class])
+
+
+def vgg_fc_loss(logits, labels):
+    cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits, labels, name='cross_entropy_per_example')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+    tf.add_to_collection('losses', cross_entropy_mean)
+    return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+
+def vgg_fc_predict(images):
+    logit, _ = my_vgg.vgg_fc_16(images, num_classes=FLAGS.num_class, is_training=False)
+    # logit_sigmoid = tf.sigmoid(logit)
+    return tf.reshape(logit, [FLAGS.num_class])
 # -------------------------------------------------------------------------------------------
 
 

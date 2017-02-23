@@ -13,25 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-"""A binary to train CIFAR-10 using a single GPU.
-
-Accuracy:
-cifar10_train.py achieves ~86% accuracy after 100K steps (256 epochs of
-data) as judged by cifar10_eval.py.
-
-Speed: With batch_size 128.
-
-System        | Step Time (sec/batch)  |     Accuracy
-------------------------------------------------------------------
-1 Tesla K20m  | 0.35-0.60              | ~86% at 60K steps  (5 hours)
-1 Tesla K40m  | 0.25-0.35              | ~86% at 100K steps (4 hours)
-
-Usage:
-Please see the tutorial and website for how to download the CIFAR-10
-data set, compile the program and train the model.
-
-http://tensorflow.org/tutorials/deep_cnn/
-"""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -41,7 +22,7 @@ import os.path
 import time
 
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
+# from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
 import voc
@@ -52,41 +33,56 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('train_dir', 'data/train',
                            """Directory where to write event logs """
                            """and checkpoint.""")
-tf.app.flags.DEFINE_integer('max_steps', 2000,
+tf.app.flags.DEFINE_integer('max_steps', 1000,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 tf.app.flags.DEFINE_string('ckpt_file', 'data/vgg_16.ckpt',
                            """Pre-trained checkpoint file""")
+tf.app.flags.DEFINE_string('train_pattern',
+                           # 'ADEF/TFR/train-?????-of-00016',
+                           'data/tf/train-?????-of-00002',
+                           """The TF record file pattern for train set""")
+tf.app.flags.DEFINE_integer('num_class', 20,
+                            'The number of class.')
+tf.app.flags.DEFINE_string('test_pattern', 'ADEF/TFR/test-?????-of-00002',
+                           """The TF record file pattern for test set""")
 
 
-def train():
+def main(argv=None):
+
+  # Create training directory.
+  train_dir = FLAGS.train_dir
+  if not tf.gfile.IsDirectory(train_dir):
+    tf.logging.info("Creating training directory: %s", train_dir)
+    tf.gfile.MakeDirs(train_dir)
+
   """Train VOC multi-label for a number of steps."""
+  # Build the TF graph
   with tf.Graph().as_default():
     global_step = tf.Variable(0, trainable=False)
 
-    # Get images and labels for VOC 2007.
-    images, labels = voc.distorted_inputs()
+    # Get images and labels from TFR files.
+    images, labels = voc.inputs(is_training=True)
 
     # Build a Graph that computes the logits predictions from the
     # inference model.
-    # logits = voc.inference(images)
-    logits = voc.vgg_inference(images)
+    logits = voc.vgg_fc_inference(images)
 
     # Calculate loss.
-    # loss = voc.loss(logits, labels)
-    loss = voc.vgg_loss(logits, labels)
+    loss = voc.vgg_fc_loss(logits, labels)
 
     # Build a Graph that trains the model with one batch of examples and
     # updates the model parameters.
     train_op = voc.train(loss, global_step)
 
     # Create a saver.
-    saver = tf.train.Saver(tf.all_variables())
+    variables_to_save = slim.get_variables(scope='vgg_16', suffix='ExponentialMovingAverage')
+    saver = tf.train.Saver(variables_to_save)
 
     # Create a restorer.
     restore_variables = slim.get_model_variables()
-    restorer = tf.train.Saver(restore_variables[:-2])
+    restorer = tf.train.Saver(restore_variables[:-6])
 
     # Build the summary operation based on the TF collection of Summaries.
     summary_op = tf.merge_all_summaries()
@@ -125,18 +121,14 @@ def train():
         print (format_str % (datetime.now(), step, loss_value,
                              examples_per_sec, sec_per_batch))
 
-      if step % 500 == 0:
+      if step % 100 == 0:
         summary_str = sess.run(summary_op)
         summary_writer.add_summary(summary_str, step)
 
       # Save the model checkpoint periodically.
-      if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
+      if step % 5000 == 0 or (step + 1) == FLAGS.max_steps:
         checkpoint_path = os.path.join(FLAGS.train_dir, 'vgg16-model.ckpt')
         saver.save(sess, checkpoint_path, global_step=step)
-
-
-def main(argv=None):  # pylint: disable=unused-argument
-  train()
 
 
 if __name__ == '__main__':

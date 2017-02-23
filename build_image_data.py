@@ -76,21 +76,20 @@ import threading
 import numpy as np
 import tensorflow as tf
 
-tf.app.flags.DEFINE_string('train_directory', '/home/julius/py-faster-rcnn/data/VOCdevkit/VOC2007',
+tf.app.flags.DEFINE_string('train_directory', '/home/julius/Data',
                            'Training data directory')
-tf.app.flags.DEFINE_string('test_directory', '/home/julius/py-faster-rcnn/data/VOCdevkit/VOC2007',
+tf.app.flags.DEFINE_string('test_directory', '/home/julius/Data',
                            'Test data directory')
-tf.app.flags.DEFINE_string('output_directory', 'data/tf',
+tf.app.flags.DEFINE_string('output_directory', 'ADEF/TFR',
                            'Output data directory')
-tf.app.flags.DEFINE_string('label_list', 'data/trainval.txt',
+tf.app.flags.DEFINE_string('label_list', 'ADEF/train.txt',
                            'Dataset list in txt')
-tf.app.flags.DEFINE_string('class_list', 'data/class_list.txt',
+tf.app.flags.DEFINE_string('class_list', 'ADEF/class_list.txt',
                            'Category names in txt')
-tf.app.flags.DEFINE_integer('train_shards', 2,
+tf.app.flags.DEFINE_integer('train_shards', 16,
                             'Number of shards in training TFRecord files.')
 tf.app.flags.DEFINE_integer('test_shards', 2,
                             'Number of shards in validation TFRecord files.')
-
 tf.app.flags.DEFINE_integer('num_threads', 2,
                             'Number of threads to preprocess the images.')
 
@@ -159,7 +158,7 @@ def my_convert_to_example(filename, label, text, coder):
   try:
     coder.decode_jpeg(image_buffer)
   except (tf.errors.InvalidArgumentError, AssertionError):
-    print("Skipping file with invalid JPEG data: %s" % image.filename)
+    print("Skipping file with invalid JPEG data: %s" % filename)
     return
 
   context = tf.train.Features(feature={
@@ -280,11 +279,18 @@ def _process_image_files_batch(coder, thread_index, ranges, name, filenames,
 
   counter = 0
   for s in xrange(num_shards_per_batch):
-    # Generate a sharded version of the file name, e.g. 'train-00002-of-00010'
+    # Generate a sharded version of the file name, e.g. 'train-00002-of-00016'
     shard = thread_index * num_shards_per_batch + s
     output_filename = '%s-%.5d-of-%.5d' % (name, shard, num_shards)
-    output_file = os.path.join(FLAGS.output_directory, output_filename)
+    # Create TF record directory
+    output_dir = FLAGS.output_directory
+    if not tf.gfile.IsDirectory(output_dir):
+        tf.logging.info("Creating TFR directory: %s", output_dir)
+        tf.gfile.MakeDirs(output_dir)
+    output_file = os.path.join(output_dir, output_filename)
     writer = tf.python_io.TFRecordWriter(output_file)
+
+    print("Processing file %s", output_filename)
 
     shard_counter = 0
     files_in_shard = np.arange(shard_ranges[s], shard_ranges[s + 1], dtype=int)
@@ -382,7 +388,7 @@ def _prase_ground_true(data_root, label_list, class_list):
   print('Determining list of input files and labels from %s.' % label_list)
   classes = [l.strip() for l in open(class_list)]
   class_to_index = dict(zip(classes, xrange(len(classes))))
-  samples = [l.rstrip('\n').split(' ') for l in tf.gfile.FastGFile(
+  samples = [l.rstrip('\n').rstrip(' ').split(' ') for l in tf.gfile.FastGFile(
       label_list, 'r').readlines()]
 
   labels = []
@@ -393,9 +399,9 @@ def _prase_ground_true(data_root, label_list, class_list):
   for i, sample in enumerate(samples):
     # Extract the object category in num i sample
     _label = sample[1:]
-    jpeg_file_path = '%s/%s/%s' % (data_root, 'JPEGImages', sample[0])
+    jpeg_file_path = '%s/%s' % (data_root, sample[0])
     # matching_files = tf.gfile.Exists(jpeg_file_path)
-    gt_classes = [0]*20
+    gt_classes = [0] * (len(classes) - 1)
     for l in _label:
         gt_classes[class_to_index[l]-1] = 1
 
@@ -436,10 +442,10 @@ def main(unused_argv):
   print('Saving results to %s' % FLAGS.output_directory)
 
   # Run it!
-  my_process_dataset('train', FLAGS.train_directory, FLAGS.train_shards,
+  # my_process_dataset('train', FLAGS.train_directory, FLAGS.train_shards,
+  #                  FLAGS.label_list, FLAGS.class_list)
+  my_process_dataset('test', FLAGS.test_directory, FLAGS.test_shards,
                      FLAGS.label_list, FLAGS.class_list)
-  # my_process_dataset('test', FLAGS.test_directory, FLAGS.test_shards,
-  #                    FLAGS.label_list, FLAGS.class_list)
 
 
 if __name__ == '__main__':

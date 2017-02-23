@@ -18,12 +18,14 @@ import os.path as osp
 import numpy as np
 
 
-def load_pascal_annotation(index, pascal_root):
+def load_pascal_annotation(index, pascal_root, with_diff=False):
     """
     Load the pascal annotation from xml file
     Args:
         index: integer specifying the index of the xml/image file name
         pascal_root: the root directory of the dataset
+        with_diff: specify whether to use difficult objects in xml file,
+                   default: False
 
     Returns:
         cls: string, the class names the objects in responding xml file
@@ -41,7 +43,9 @@ def load_pascal_annotation(index, pascal_root):
     cls = ''
 
     for obj in objs:
-        cls += str(get_data_from_tag(obj, "name")).lower().strip() + ' '
+        is_diff = get_data_from_tag(obj, 'difficult')
+        if with_diff or is_diff == '0':
+          cls += str(get_data_from_tag(obj, "name")).lower().strip() + ' '
 
     return cls
 
@@ -60,7 +64,7 @@ def xml_2_txt(pascal_root, input_file, out_file):
     indexlist = [line.rstrip('\n') for line in open(osp.join(pascal_root, 'ImageSets/Main', input_file))]
     f = open(out_file, 'w')
     for i, index in enumerate(indexlist):
-        cls = load_pascal_annotation(index, pascal_root)
+        cls = load_pascal_annotation(index, pascal_root, with_diff=False)
         label = index + '.jpg ' + cls
         label = label.rstrip(' ') + '\n'
         f.write(label)
